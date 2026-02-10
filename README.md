@@ -12,7 +12,11 @@
 - **速率控制** - 每日上限 50 次，防止账号被限制
 - **纯本地存储** - 所有数据存储在本地，保护用户隐私
 
-## 安装
+## 下载
+
+### 从 GitHub Releases 下载（推荐）
+
+访问 [Releases 页面](https://github.com/HanboyLee/unfollow-xx/releases) 下载最新版本。
 
 ### 开发模式安装
 
@@ -97,6 +101,24 @@ npm run dev
 # 构建生产版本
 npm run build
 ```
+
+### 发布新版本
+
+```bash
+# 补丁版本 (1.0.0 -> 1.0.1)
+npm run release:patch
+
+# 次要版本 (1.0.0 -> 1.1.0)
+npm run release:minor
+
+# 主要版本 (1.0.0 -> 2.0.0)
+npm run release:major
+
+# 交互式选择
+npm run release
+```
+
+详细说明请参考 [发布指南](./RELEASE.md)。
 
 ## 许可证
 
