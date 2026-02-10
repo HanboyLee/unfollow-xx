@@ -82,7 +82,13 @@ async function init() {
 }
 
 function bindEvents() {
-  DOM.btnScan.addEventListener('click', startScan);
+  DOM.btnScan.addEventListener('click', () => {
+    if (state.isScanning) {
+      stopScan();
+    } else {
+      startScan();
+    }
+  });
 
   // Search
   DOM.searchInput.addEventListener('input', debounce(() => {
@@ -153,6 +159,9 @@ function updateQuotaUI() {
 async function startScan() {
   if (state.isScanning) return;
   state.isScanning = true;
+  DOM.btnScan.innerHTML = `<svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> 停止扫描`;
+  DOM.btnScan.classList.add('btn-danger');
+  DOM.btnScan.classList.remove('btn-primary');
   DOM.scanProgressContainer.style.display = '';
   DOM.scanProgressFill.style.width = '0%';
   DOM.scanProgressText.textContent = '正在准备扫描...';
@@ -181,8 +190,25 @@ async function startScan() {
   }
 }
 
+async function stopScan() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab) {
+      await chrome.runtime.sendMessage({
+        type: 'STOP_SCAN_TAB',
+        data: { tabId: tab.id },
+      });
+    }
+  } catch (e) { /* ignore */ }
+  resetScanState();
+  showToast(DOM.toastContainer, '扫描已停止', 'info');
+}
+
 function resetScanState() {
   state.isScanning = false;
+  DOM.btnScan.innerHTML = `<svg class="btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> 扫描关注列表`;
+  DOM.btnScan.classList.remove('btn-danger');
+  DOM.btnScan.classList.add('btn-primary');
   DOM.scanProgressContainer.style.display = 'none';
 }
 
@@ -388,6 +414,7 @@ function renderUserList() {
               ${user.isBlueVerified ? blueCheckSvg() : ''}
             </div>
             <div class="user-handle">@${escapeHtml(user.screenName)}</div>
+            ${user.followersCount != null ? `<div class="user-followers">粉丝 ${formatNumber(user.followersCount)}</div>` : ''}
           </div>
           <div class="user-actions">
             <span class="badge ${getBadgeClass(user.status)}">${getBadgeText(user.status)}</span>

@@ -17,6 +17,7 @@
   };
 
   let isScanning = false;
+  let shouldStop = false;
 
   // ============================================
   // Message Handling
@@ -31,6 +32,11 @@
       case 'START_SCAN':
         handleStartScan(sendResponse);
         return true;
+
+      case 'STOP_SCAN':
+        shouldStop = true;
+        sendResponse({ ok: true });
+        return;
 
       case 'UNFOLLOW_USER':
         handleUnfollowUser(message.data).then(sendResponse).catch((err) => {
@@ -51,20 +57,12 @@
     }
 
     isScanning = true;
+    shouldStop = false;
     sendResponse({ ok: true });
 
     try {
-      const currentUser = getCurrentUsername();
-      if (!currentUser) {
-        throw new Error('无法获取当前用户名，请确保已登录 X');
-      }
-
-      const followingUrl = `/${currentUser}/following`;
-      if (!window.location.pathname.includes('/following')) {
-        window.location.href = `https://x.com${followingUrl}`;
-        await sleep(3000);
-      }
-
+      // Navigation and fetch interceptor injection are handled by the background.
+      // We just need to scan the current page.
       const users = await scanByScrolling();
 
       chrome.runtime.sendMessage({
@@ -114,31 +112,29 @@
     const users = [];
     const seenIds = new Set();
     let noNewDataCount = 0;
-
-    const originalFetch = window.fetch;
     const capturedResponses = [];
 
-    window.fetch = async function (...args) {
-      const response = await originalFetch.apply(this, args);
-
+    // Listen for API data from the MAIN world fetch interceptor
+    // (injected by the background service worker via chrome.scripting.executeScript)
+    function onMainWorldMessage(event) {
+      if (event.source !== window || event.data?.type !== '__X_UNFOLLOWER_API_DATA__') return;
       try {
-        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-        if (url.includes('/Following') || url.includes('/followers') || url.includes('Following')) {
-          response.clone().json().then((data) => {
-            const extracted = extractUsersFromResponse(data);
-            capturedResponses.push(...extracted);
-          }).catch(() => {});
-        }
-      } catch (e) { /* ignore */ }
-
-      return response;
-    };
+        const extracted = extractUsersFromResponse(event.data.payload);
+        console.log('[X Unfollower] Received API data, extracted', extracted.length, 'users');
+        capturedResponses.push(...extracted);
+      } catch (e) {
+        console.log('[X Unfollower] Error extracting users:', e);
+      }
+    }
+    window.addEventListener('message', onMainWorldMessage);
 
     let previousScrollHeight = 0;
     await sleep(2000);
     processVisibleUsers(users, seenIds);
 
     for (let i = 0; i < 200; i++) {
+      if (shouldStop) break;
+
       window.scrollTo(0, document.body.scrollHeight);
       await sleep(CONFIG.SCROLL_INTERVAL);
 
@@ -171,7 +167,9 @@
       previousScrollHeight = currentScrollHeight;
     }
 
-    window.fetch = originalFetch;
+    // Clean up
+    window.removeEventListener('message', onMainWorldMessage);
+
     return users;
   }
 
@@ -197,18 +195,26 @@
 
           if (result) {
             const legacy = result.legacy || {};
+            const core = result.core || {};
+            const avatarObj = result.avatar || {};
+            const relationship = result.relationship_perspectives || {};
+            const profileBio = result.profile_bio || {};
+
+            const followedBy = relationship.followed_by || false;
+            const avatarUrl = (avatarObj.image_url || '').replace('_normal', '_bigger');
+
             const user = {
               id: result.rest_id || result.id,
-              name: legacy.name || '',
-              screenName: legacy.screen_name || '',
-              avatar: (legacy.profile_image_url_https || '').replace('_normal', '_bigger'),
+              name: core.name || '',
+              screenName: core.screen_name || '',
+              avatar: avatarUrl,
               followersCount: legacy.followers_count || 0,
               followingCount: legacy.friends_count || 0,
-              isFollowingYou: legacy.followed_by || false,
+              isFollowingYou: followedBy,
               isBlueVerified: result.is_blue_verified || false,
               statusesCount: legacy.statuses_count || 0,
-              status: legacy.followed_by ? 'mutual' : 'not-following-back',
-              description: legacy.description || '',
+              status: followedBy ? 'mutual' : 'not-following-back',
+              description: profileBio.description || legacy.description || '',
             };
 
             if (user.id) users.push(user);

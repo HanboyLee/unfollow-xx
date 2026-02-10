@@ -519,6 +519,12 @@ body {
   text-overflow: ellipsis;
 }
 
+.user-followers {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+
 .user-actions {
   display: flex;
   align-items: center;

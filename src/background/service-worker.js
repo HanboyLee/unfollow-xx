@@ -44,8 +44,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'START_SCAN_TAB':
-      ensureContentScript(message.data.tabId)
-        .then(() => sendMessageToTab(message.data.tabId, { type: 'START_SCAN' }))
+      handleStartScanTab(message.data.tabId, sendResponse);
+      return true;
+
+    case 'STOP_SCAN_TAB':
+      sendMessageToTab(message.data.tabId, { type: 'STOP_SCAN' })
         .then((resp) => sendResponse(resp))
         .catch((err) => sendResponse({ ok: false, error: err.message }));
       return true;
@@ -54,6 +57,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   sendResponse({ ok: true });
   return true;
 });
+
+/**
+ * Full scan orchestration:
+ * 1. Navigate to /following if needed (via chrome.tabs.update)
+ * 2. Wait for page to finish loading
+ * 3. Inject content script
+ * 4. Inject fetch interceptor into MAIN world
+ * 5. Send START_SCAN to content script
+ */
+async function handleStartScanTab(tabId, sendResponse) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab.url || '';
+
+    // Navigate to /following if not already there
+    if (!url.includes('/following')) {
+      // Extract username from the current X URL
+      const match = url.match(/x\.com\/([a-zA-Z0-9_]+)/);
+      if (!match) {
+        sendResponse({ ok: false, error: '请先打开 X 的个人页面' });
+        return;
+      }
+      const username = match[1];
+      await chrome.tabs.update(tabId, { url: `https://x.com/${username}/following` });
+      // Wait for page load to complete
+      await waitForTabLoad(tabId);
+      await new Promise(r => setTimeout(r, 1500)); // extra settle time
+    }
+
+    // Inject content script (if not already loaded)
+    await ensureContentScript(tabId);
+
+    // Inject fetch interceptor into MAIN world (bypasses CSP)
+    await injectFetchInterceptor(tabId);
+
+    // Tell content script to start scanning (no navigation needed)
+    const resp = await sendMessageToTab(tabId, { type: 'START_SCAN' });
+    sendResponse(resp);
+  } catch (err) {
+    sendResponse({ ok: false, error: err.message });
+  }
+}
 
 // ============================================
 // Single Unfollow with Daily Limit
@@ -110,8 +155,94 @@ async function handleSingleUnfollow({ user, tabId }, sendResponse) {
 }
 
 // ============================================
+// Fetch Interceptor (MAIN world)
+// ============================================
+
+/**
+ * Inject a fetch interceptor into the page's MAIN world.
+ * Uses chrome.scripting.executeScript with world: 'MAIN' to bypass CSP.
+ * Intercepted X API responses are relayed to the content script via postMessage.
+ */
+async function injectFetchInterceptor(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: () => {
+      if (window.__xUnfollowerFetchHooked) return;
+      window.__xUnfollowerFetchHooked = true;
+      console.log('[X Unfollower] Fetch interceptor injected into MAIN world');
+
+      // Intercept fetch
+      const _origFetch = window.fetch;
+      window.fetch = async function(...args) {
+        const resp = await _origFetch.apply(this, args);
+        try {
+          const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+          if (url.includes('/Following') || url.includes('/graphql/')) {
+            if (url.includes('Following')) {
+              console.log('[X Unfollower] Intercepted fetch:', url.substring(0, 100));
+              resp.clone().json().then(function(data) {
+                console.log('[X Unfollower] Sending API data via postMessage');
+                window.postMessage({ type: '__X_UNFOLLOWER_API_DATA__', payload: data }, '*');
+              }).catch(function(e) {
+                console.log('[X Unfollower] Failed to parse response:', e);
+              });
+            }
+          }
+        } catch(e) {
+          console.log('[X Unfollower] Fetch intercept error:', e);
+        }
+        return resp;
+      };
+
+      // Also intercept XMLHttpRequest in case X uses it
+      const _origXHROpen = XMLHttpRequest.prototype.open;
+      const _origXHRSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__xUnfollowerUrl = url;
+        return _origXHROpen.call(this, method, url, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function(...args) {
+        if (this.__xUnfollowerUrl && this.__xUnfollowerUrl.includes('Following')) {
+          console.log('[X Unfollower] Intercepted XHR:', this.__xUnfollowerUrl.substring(0, 100));
+          this.addEventListener('load', function() {
+            try {
+              const data = JSON.parse(this.responseText);
+              console.log('[X Unfollower] Sending XHR data via postMessage');
+              window.postMessage({ type: '__X_UNFOLLOWER_API_DATA__', payload: data }, '*');
+            } catch(e) {}
+          });
+        }
+        return _origXHRSend.apply(this, args);
+      };
+    },
+  });
+}
+
+// ============================================
 // Helpers
 // ============================================
+
+/**
+ * Wait for a tab to finish loading after navigation.
+ */
+function waitForTabLoad(tabId) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(); // resolve anyway after timeout
+    }, 15000);
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
 
 function broadcastToSidePanel(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
