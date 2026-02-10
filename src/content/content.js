@@ -7,6 +7,10 @@
 (() => {
   'use strict';
 
+  // Prevent duplicate injection when programmatically re-injected
+  if (window.__xUnfollowerLoaded) return;
+  window.__xUnfollowerLoaded = true;
+
   const CONFIG = {
     SCROLL_INTERVAL: 1500,
     MAX_SCROLL_RETRIES: 5,
@@ -20,6 +24,10 @@
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
+      case 'PING':
+        sendResponse({ ok: true });
+        return;
+
       case 'START_SCAN':
         handleStartScan(sendResponse);
         return true;
@@ -266,26 +274,42 @@
   // ============================================
 
   async function handleUnfollowUser({ userId, screenName }) {
+    // Try API method first (most reliable)
     try {
-      const result = await unfollowViaAPI(userId);
+      const result = await unfollowViaAPI(userId, screenName);
       if (result) return { success: true };
     } catch (e) {
       console.log('API unfollow failed, trying DOM method:', e);
     }
 
+    // Try DOM method: first check current page, then navigate to profile
     try {
       await unfollowViaDOM(screenName);
+      return { success: true };
+    } catch (e) {
+      console.log('DOM unfollow on current page failed, trying profile page:', e);
+    }
+
+    // Last resort: navigate to user profile and click unfollow there
+    try {
+      await unfollowViaProfile(screenName);
       return { success: true };
     } catch (e) {
       throw new Error(`无法取消关注 @${screenName}: ${e.message}`);
     }
   }
 
-  async function unfollowViaAPI(userId) {
+  async function unfollowViaAPI(userId, screenName) {
     const ct0 = getCookie('ct0');
     if (!ct0) throw new Error('Missing csrf token');
 
     const bearerToken = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+
+    // Detect if userId is numeric or a screen name
+    const isNumericId = /^\d+$/.test(userId);
+    const body = isNumericId
+      ? `user_id=${userId}`
+      : `screen_name=${screenName || userId}`;
 
     const response = await fetch('https://x.com/i/api/1.1/friendships/destroy.json', {
       method: 'POST',
@@ -297,13 +321,16 @@
         'X-Twitter-Active-User': 'yes',
       },
       credentials: 'include',
-      body: `user_id=${userId}`,
+      body,
     });
 
     if (!response.ok) throw new Error(`API error: ${response.status}`);
     return true;
   }
 
+  /**
+   * Try to find and click the unfollow button in the currently visible user cells.
+   */
   async function unfollowViaDOM(screenName) {
     const userCells = document.querySelectorAll('[data-testid="UserCell"]');
 
@@ -311,24 +338,79 @@
       const linkEl = cell.querySelector(`a[href="/${screenName}"]`);
       if (!linkEl) continue;
 
-      const followingBtn = cell.querySelector('[data-testid$="-unfollow"]') ||
-                           cell.querySelector('button[aria-label*="Following"]') ||
-                           cell.querySelector('button[data-testid="placementTracking"] div[dir="ltr"]');
+      if (await clickUnfollowButton(cell)) return;
+    }
+
+    throw new Error('User cell not found on current page');
+  }
+
+  /**
+   * Navigate to user's profile page and click the "Following" button to unfollow.
+   */
+  async function unfollowViaProfile(screenName) {
+    const previousUrl = window.location.href;
+
+    // Navigate to user profile
+    window.location.href = `https://x.com/${screenName}`;
+    await sleep(3000);
+
+    // Look for the "Following" button on the profile page
+    const maxRetries = 5;
+    for (let i = 0; i < maxRetries; i++) {
+      const followingBtn =
+        document.querySelector(`[data-testid="placementTracking"] [data-testid="${screenName}-unfollow"]`) ||
+        document.querySelector('[data-testid="placementTracking"]') ||
+        document.querySelector('button[aria-label*="Following"]') ||
+        document.querySelector('button[aria-label*="关注中"]') ||
+        document.querySelector('button[aria-label*="正在关注"]');
 
       if (followingBtn) {
         followingBtn.click();
-        await sleep(500);
+        await sleep(800);
 
+        // Click confirm button in the dialog
         const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
         if (confirmBtn) {
           confirmBtn.click();
-          await sleep(300);
+          await sleep(500);
+
+          // Navigate back
+          try { window.location.href = previousUrl; } catch (_) {}
           return;
         }
       }
+
+      await sleep(1000);
     }
 
-    throw new Error('Could not find unfollow button');
+    // Navigate back even if failed
+    try { window.location.href = previousUrl; } catch (_) {}
+    throw new Error('Could not find unfollow button on profile page');
+  }
+
+  /**
+   * Click the unfollow button inside a user cell element and confirm.
+   */
+  async function clickUnfollowButton(cell) {
+    const followingBtn = cell.querySelector('[data-testid$="-unfollow"]') ||
+                         cell.querySelector('button[aria-label*="Following"]') ||
+                         cell.querySelector('button[aria-label*="关注中"]') ||
+                         cell.querySelector('button[aria-label*="正在跟隨"]') ||
+                         cell.querySelector('button[data-testid="placementTracking"] div[dir="ltr"]');
+
+    if (followingBtn) {
+      followingBtn.click();
+      await sleep(500);
+
+      const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]');
+      if (confirmBtn) {
+        confirmBtn.click();
+        await sleep(300);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ============================================

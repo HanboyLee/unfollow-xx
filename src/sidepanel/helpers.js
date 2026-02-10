@@ -53,6 +53,16 @@ export function blueCheckSvg() {
 }
 
 /**
+ * Handle avatar image load errors — replace with a gray placeholder.
+ * Used as an event listener to replace inline onerror (blocked by extension CSP).
+ */
+export function handleAvatarError(e) {
+  const img = e.target;
+  img.removeEventListener('error', handleAvatarError);
+  img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect fill='%23202327' width='40' height='40'/%3E%3C/svg%3E";
+}
+
+/**
  * Debounce function
  */
 export function debounce(fn, delay = 300) {

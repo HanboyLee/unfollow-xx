@@ -4,7 +4,7 @@
  */
 
 import './sidepanel.css';
-import { showToast, escapeHtml, formatNumber, getBadgeClass, getBadgeText, blueCheckSvg, debounce } from './helpers.js';
+import { showToast, escapeHtml, formatNumber, getBadgeClass, getBadgeText, blueCheckSvg, handleAvatarError, debounce } from './helpers.js';
 
 const DAILY_LIMIT = 50;
 
@@ -165,12 +165,16 @@ async function startScan() {
       return;
     }
 
-    chrome.tabs.sendMessage(tab.id, { type: 'START_SCAN' }, (response) => {
-      if (chrome.runtime.lastError) {
-        showToast(DOM.toastContainer, '无法连接到页面，请刷新 X 页面后重试', 'error');
-        resetScanState();
-      }
+    // Route through background to auto-inject content script if needed
+    const response = await chrome.runtime.sendMessage({
+      type: 'START_SCAN_TAB',
+      data: { tabId: tab.id },
     });
+
+    if (response && !response.ok && response.error) {
+      showToast(DOM.toastContainer, '无法连接到页面: ' + response.error, 'error');
+      resetScanState();
+    }
   } catch (err) {
     showToast(DOM.toastContainer, '扫描失败: ' + err.message, 'error');
     resetScanState();
@@ -195,13 +199,13 @@ function openUnfollowModal(user) {
   state.pendingUnfollow = user;
 
   DOM.modalUser.innerHTML = `
-    <img class="modal-user-avatar" src="${user.avatar || ''}"
-         onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 36 36%22><rect fill=%22%23202327%22 width=%2236%22 height=%2236%22/></svg>'">
+    <img class="modal-user-avatar" src="${user.avatar || ''}">
     <div class="modal-user-info">
       <div class="modal-user-name">${escapeHtml(user.name || user.screenName)}${user.isBlueVerified ? ' ' + blueCheckSvg() : ''}</div>
       <div class="modal-user-handle">@${escapeHtml(user.screenName)}</div>
     </div>
   `;
+  DOM.modalUser.querySelector('img').addEventListener('error', handleAvatarError);
 
   DOM.modalOverlay.style.display = '';
 }
@@ -377,8 +381,7 @@ function renderUserList() {
 
       return `
         <div class="user-item" data-id="${user.id}" style="animation-delay: ${Math.min(index * 20, 400)}ms">
-          <img class="user-avatar" src="${user.avatar || ''}" alt=""
-               onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 40 40%22><rect fill=%22%23202327%22 width=%2240%22 height=%2240%22/></svg>'">
+          <img class="user-avatar" src="${user.avatar || ''}" alt="">
           <div class="user-info">
             <div class="user-name-row">
               <span class="user-name">${escapeHtml(user.name || user.screenName)}</span>
@@ -408,6 +411,9 @@ function renderUserList() {
   DOM.userList.querySelectorAll('.user-item').forEach((el) => {
     const userId = el.dataset.id;
     const user = state.users.find((u) => u.id === userId);
+
+    // Avatar fallback
+    el.querySelector('.user-avatar').addEventListener('error', handleAvatarError);
 
     el.querySelector('.btn-whitelist').addEventListener('click', (e) => {
       e.stopPropagation();

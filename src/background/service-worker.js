@@ -36,6 +36,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ count, limit: DAILY_UNFOLLOW_LIMIT });
       });
       return true;
+
+    case 'ENSURE_CONTENT_SCRIPT':
+      ensureContentScript(message.data.tabId)
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+
+    case 'START_SCAN_TAB':
+      ensureContentScript(message.data.tabId)
+        .then(() => sendMessageToTab(message.data.tabId, { type: 'START_SCAN' }))
+        .then((resp) => sendResponse(resp))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
   }
 
   sendResponse({ ok: true });
@@ -104,7 +117,43 @@ function broadcastToSidePanel(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
-function sendToTab(tabId, message) {
+/**
+ * Ensure the content script is loaded in the tab.
+ * If not, inject it programmatically (handles extension reload without page refresh).
+ */
+async function ensureContentScript(tabId) {
+  try {
+    const response = await sendMessageToTab(tabId, { type: 'PING' });
+    if (response && response.ok) return;
+  } catch (e) {
+    // Content script not loaded, inject it
+  }
+
+  const manifest = chrome.runtime.getManifest();
+  const contentScriptFile = manifest.content_scripts?.[0]?.js?.[0];
+  if (!contentScriptFile) throw new Error('Content script not found in manifest');
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [contentScriptFile],
+  });
+
+  // Wait for script to initialize
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+/**
+ * Send message to tab with auto content script injection.
+ */
+async function sendToTab(tabId, message) {
+  await ensureContentScript(tabId);
+  return sendMessageToTab(tabId, message);
+}
+
+/**
+ * Low-level tab message sender (no injection logic).
+ */
+function sendMessageToTab(tabId, message) {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
       if (chrome.runtime.lastError) {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Unfollower",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "智能管理 X (Twitter) 关注列表，批量取消关注不互关或非蓝 V 的账号",
   "icons": {
     "16": "src/assets/icons/icon16.png",
@@ -22,7 +22,8 @@
     "default_path": "src/sidepanel/index.html"
   },
   "background": {
-    "service_worker": "src/background/service-worker.js"
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
   },
   "content_scripts": [
     {
@@ -30,14 +31,17 @@
         "https://x.com/*",
         "https://twitter.com/*"
       ],
-      "js": ["src/content/content.js"],
+      "js": [
+        "src/content/content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "permissions": [
     "activeTab",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "scripting"
   ],
   "host_permissions": [
     "https://x.com/*",
