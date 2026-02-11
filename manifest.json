@@ -32,6 +32,17 @@
         "https://twitter.com/*"
       ],
       "js": [
+        "src/content/fetch-interceptor.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
         "src/content/content.js"
       ],
       "run_at": "document_idle"

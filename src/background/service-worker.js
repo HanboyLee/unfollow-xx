@@ -60,39 +60,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 /**
  * Full scan orchestration:
- * 1. Navigate to /following if needed (via chrome.tabs.update)
- * 2. Wait for page to finish loading
- * 3. Inject content script
- * 4. Inject fetch interceptor into MAIN world
- * 5. Send START_SCAN to content script
+ * 1. Navigate to the user's PROFILE page (not /following)
+ * 2. Inject content script & fetch interceptor on the profile page
+ * 3. Tell content script to click the "Following" tab (SPA navigation)
+ *    → This triggers a new GraphQL request that our interceptor captures
+ * 4. Start scanning
+ *
+ * This order ensures the fetch interceptor is in place BEFORE
+ * X makes the GraphQL request for the following list.
  */
 async function handleStartScanTab(tabId, sendResponse) {
   try {
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url || '';
 
-    // Navigate to /following if not already there
-    if (!url.includes('/following')) {
-      // Extract username from the current X URL
-      const match = url.match(/x\.com\/([a-zA-Z0-9_]+)/);
-      if (!match) {
-        sendResponse({ ok: false, error: '请先打开 X 的个人页面' });
-        return;
-      }
-      const username = match[1];
-      await chrome.tabs.update(tabId, { url: `https://x.com/${username}/following` });
-      // Wait for page load to complete
+    // Extract username from the current X URL
+    const match = url.match(/x\.com\/([a-zA-Z0-9_]+)/);
+    if (!match) {
+      sendResponse({ ok: false, error: '请先打开 X 的个人页面' });
+      return;
+    }
+    const username = match[1];
+
+    // Step 1: Navigate to PROFILE page (not /following) if not already there
+    const profileUrl = `https://x.com/${username}`;
+    if (url.includes('/following')) {
+      // Already on /following — go back to profile so we can re-enter via SPA navigation
+      await chrome.tabs.update(tabId, { url: profileUrl });
       await waitForTabLoad(tabId);
-      await new Promise(r => setTimeout(r, 1500)); // extra settle time
+      await new Promise(r => setTimeout(r, 2000));
+    } else if (!url.startsWith(profileUrl) || url.includes('/followers') || url.includes('/verified_followers')) {
+      // On a different page — navigate to profile
+      await chrome.tabs.update(tabId, { url: profileUrl });
+      await waitForTabLoad(tabId);
+      await new Promise(r => setTimeout(r, 2000));
     }
 
-    // Inject content script (if not already loaded)
+    // Step 2: Inject content script + fetch interceptor on the PROFILE page
     await ensureContentScript(tabId);
-
-    // Inject fetch interceptor into MAIN world (bypasses CSP)
     await injectFetchInterceptor(tabId);
 
-    // Tell content script to start scanning (no navigation needed)
+    // Step 3: Tell content script to click "Following" tab for SPA navigation
+    // This triggers a new fetch request that our interceptor will capture
+    const navResult = await sendMessageToTab(tabId, {
+      type: 'NAVIGATE_TO_FOLLOWING',
+      data: { username },
+    });
+
+    if (navResult && !navResult.ok) {
+      sendResponse({ ok: false, error: navResult.error || 'SPA导航失败' });
+      return;
+    }
+
+    // Step 4: Wait for SPA navigation to complete and data to start loading
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Step 5: Start scanning
     const resp = await sendMessageToTab(tabId, { type: 'START_SCAN' });
     sendResponse(resp);
   } catch (err) {
@@ -170,51 +193,25 @@ async function injectFetchInterceptor(tabId) {
     func: () => {
       if (window.__xUnfollowerFetchHooked) return;
       window.__xUnfollowerFetchHooked = true;
-      console.log('[X Unfollower] Fetch interceptor injected into MAIN world');
+      console.log('[X Unfollower] 🔧 Fetch interceptor injected (fallback from service-worker)');
 
-      // Intercept fetch
       const _origFetch = window.fetch;
-      window.fetch = async function(...args) {
-        const resp = await _origFetch.apply(this, args);
-        try {
-          const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-          if (url.includes('/Following') || url.includes('/graphql/')) {
-            if (url.includes('Following')) {
-              console.log('[X Unfollower] Intercepted fetch:', url.substring(0, 100));
+      window.fetch = function() {
+        const args = arguments;
+        return _origFetch.apply(this, args).then(function(resp) {
+          try {
+            const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+            if (url.indexOf('/Following') !== -1 || url.indexOf('/following') !== -1) {
+              console.log('[X Unfollower] 🎯 INTERCEPTED Following API (fallback):', url.substring(0, 120));
               resp.clone().json().then(function(data) {
-                console.log('[X Unfollower] Sending API data via postMessage');
                 window.postMessage({ type: '__X_UNFOLLOWER_API_DATA__', payload: data }, '*');
-              }).catch(function(e) {
-                console.log('[X Unfollower] Failed to parse response:', e);
-              });
+              }).catch(function() {});
             }
-          }
-        } catch(e) {
-          console.log('[X Unfollower] Fetch intercept error:', e);
-        }
-        return resp;
+          } catch(e) {}
+          return resp;
+        });
       };
-
-      // Also intercept XMLHttpRequest in case X uses it
-      const _origXHROpen = XMLHttpRequest.prototype.open;
-      const _origXHRSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        this.__xUnfollowerUrl = url;
-        return _origXHROpen.call(this, method, url, ...rest);
-      };
-      XMLHttpRequest.prototype.send = function(...args) {
-        if (this.__xUnfollowerUrl && this.__xUnfollowerUrl.includes('Following')) {
-          console.log('[X Unfollower] Intercepted XHR:', this.__xUnfollowerUrl.substring(0, 100));
-          this.addEventListener('load', function() {
-            try {
-              const data = JSON.parse(this.responseText);
-              console.log('[X Unfollower] Sending XHR data via postMessage');
-              window.postMessage({ type: '__X_UNFOLLOWER_API_DATA__', payload: data }, '*');
-            } catch(e) {}
-          });
-        }
-        return _origXHRSend.apply(this, args);
-      };
+      window.fetch.toString = function() { return _origFetch.toString(); };
     },
   });
 }

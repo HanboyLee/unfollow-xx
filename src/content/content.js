@@ -20,6 +20,44 @@
   let shouldStop = false;
 
   // ============================================
+  // Global API Data Capture
+  // ============================================
+  // capturedResponses is at module level so it starts capturing
+  // API data immediately (before START_SCAN is sent).
+  // This is critical for the SPA navigation flow where
+  // the fetch interceptor captures data before scanning begins.
+  const capturedResponses = [];
+
+  function onMainWorldMessage(event) {
+    // Don't check event.source — MAIN world messages may have different source in ISOLATED world
+    if (!event.data || event.data.type !== '__X_UNFOLLOWER_API_DATA__') return;
+    const payload = event.data.payload;
+    console.log('[X Unfollower] 📨 收到postMessage, payload keys:', Object.keys(payload || {}));
+    // 深度结构日志，帮助调试 API 结构变化
+    try {
+      const dataKeys = Object.keys(payload?.data || {});
+      const userKeys = Object.keys(payload?.data?.user || {});
+      const resultKeys = Object.keys(payload?.data?.user?.result || {});
+      console.log('[X Unfollower] 📦 结构: data->', dataKeys, '| user->', userKeys, '| result->', resultKeys);
+    } catch (_) {}
+    try {
+      const extracted = extractUsersFromResponse(payload);
+      console.log('[X Unfollower] 🟢 API收到数据, 提取了', extracted.length, '个用户');
+      if (extracted.length === 0) {
+        console.log('[X Unfollower] ⚠️ 提取0个用户! 原始payload:', JSON.stringify(payload).substring(0, 500));
+      }
+      extracted.forEach(u => {
+        console.log(`[X Unfollower]   API用户: @${u.screenName} | id=${u.id} | followers=${u.followersCount}`);
+      });
+      capturedResponses.push(...extracted);
+    } catch (e) {
+      console.log('[X Unfollower] ❌ Error extracting users:', e);
+    }
+  }
+  window.addEventListener('message', onMainWorldMessage);
+  console.log('[X Unfollower] ✅ Content script loaded, message listener active');
+
+  // ============================================
   // Message Handling
   // ============================================
 
@@ -43,8 +81,63 @@
           sendResponse({ success: false, error: err.message });
         });
         return true;
+
+      case 'NAVIGATE_TO_FOLLOWING':
+        handleNavigateToFollowing(message.data).then(sendResponse).catch((err) => {
+          sendResponse({ ok: false, error: err.message });
+        });
+        return true;
     }
   });
+
+  // ============================================
+  // SPA Navigation to /following
+  // ============================================
+
+  /**
+   * Click the "Following" tab on the profile page to trigger SPA navigation.
+   * This avoids a full page reload, keeping the fetch interceptor intact.
+   */
+  async function handleNavigateToFollowing({ username }) {
+    console.log(`[X Unfollower] 🔀 SPA导航: 查找 /${username}/following 链接...`);
+    // Try multiple selectors to find the "Following" link/tab
+    const selectors = [
+      `a[href="/${username}/following"]`,
+      `a[href="/${username}/following"][role="link"]`,
+      `a[href="/${username}/following"][role="tab"]`,
+      'a[href$="/following"][role="link"]',
+      'a[href$="/following"][role="tab"]',
+    ];
+
+    let followingLink = null;
+    for (const sel of selectors) {
+      followingLink = document.querySelector(sel);
+      if (followingLink) {
+        console.log(`[X Unfollower] ✅ 找到链接 (selector: ${sel})`);
+        break;
+      }
+    }
+
+    if (followingLink) {
+      console.log('[X Unfollower] Clicking "Following" tab for SPA navigation');
+      followingLink.click();
+      return { ok: true };
+    }
+
+    // Fallback: use history.pushState + popstate for SPA navigation
+    console.log('[X Unfollower] "Following" link not found, using pushState fallback');
+    const targetUrl = `/${username}/following`;
+    window.history.pushState({}, '', targetUrl);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+
+    // Double fallback: if pushState doesn't trigger React Router, use location
+    await sleep(500);
+    if (!window.location.pathname.includes('/following')) {
+      window.location.href = `https://x.com${targetUrl}`;
+    }
+
+    return { ok: true };
+  }
 
   // ============================================
   // Scan
@@ -112,24 +205,13 @@
     const users = [];
     const seenIds = new Set();
     let noNewDataCount = 0;
-    const capturedResponses = [];
 
-    // Listen for API data from the MAIN world fetch interceptor
-    // (injected by the background service worker via chrome.scripting.executeScript)
-    function onMainWorldMessage(event) {
-      if (event.source !== window || event.data?.type !== '__X_UNFOLLOWER_API_DATA__') return;
-      try {
-        const extracted = extractUsersFromResponse(event.data.payload);
-        console.log('[X Unfollower] Received API data, extracted', extracted.length, 'users');
-        capturedResponses.push(...extracted);
-      } catch (e) {
-        console.log('[X Unfollower] Error extracting users:', e);
-      }
-    }
-    window.addEventListener('message', onMainWorldMessage);
+    // capturedResponses and onMainWorldMessage are at module level,
+    // so API data captured during SPA navigation is already available.
+    console.log(`[X Unfollower] 扫描开始, 已缓存 ${capturedResponses.length} 个API用户`);
 
     let previousScrollHeight = 0;
-    await sleep(2000);
+    await sleep(2000);  // 等待SPA导航数据加载完成
     processVisibleUsers(users, seenIds);
 
     for (let i = 0; i < 200; i++) {
@@ -140,9 +222,24 @@
 
       while (capturedResponses.length > 0) {
         const user = capturedResponses.shift();
-        if (user && user.id && !seenIds.has(user.id)) {
-          seenIds.add(user.id);
-          users.push(user);
+        if (user && user.id) {
+          // 检查是否已有同 screenName 的不完整数据（DOM 回退）
+          const existingIdx = users.findIndex(
+            (u) => u.screenName === user.screenName && u.incomplete
+          );
+          if (existingIdx !== -1) {
+            // 用 API 完整数据替换 DOM 不完整数据
+            console.log(`[X Unfollower] 🔄 替换DOM数据: @${user.screenName} | followers=${user.followersCount}`);
+            users[existingIdx] = user;
+            seenIds.add(user.id);
+          } else if (!seenIds.has(user.id) && !seenIds.has(user.screenName)) {
+            console.log(`[X Unfollower] ➕ 新增API用户: @${user.screenName} | followers=${user.followersCount}`);
+            seenIds.add(user.id);
+            seenIds.add(user.screenName);
+            users.push(user);
+          } else {
+            console.log(`[X Unfollower] ⏭️ 跳过API用户(已存在): @${user.screenName} | id=${user.id} | seenById=${seenIds.has(user.id)} | seenByName=${seenIds.has(user.screenName)}`);
+          }
         }
       }
 
@@ -167,8 +264,18 @@
       previousScrollHeight = currentScrollHeight;
     }
 
-    // Clean up
-    window.removeEventListener('message', onMainWorldMessage);
+    // Note: message listener stays active at module level for future scans
+
+    // 调试: 统计数据来源
+    const apiUsers = users.filter(u => !u.incomplete);
+    const domUsers = users.filter(u => u.incomplete);
+    console.log('[X Unfollower] ====== 扫描完成统计 ======');
+    console.log(`[X Unfollower] 总用户: ${users.length} | API完整: ${apiUsers.length} | DOM不完整: ${domUsers.length}`);
+    if (domUsers.length > 0) {
+      console.log('[X Unfollower] 缺少粉丝数据的用户:');
+      domUsers.forEach(u => console.log(`[X Unfollower]   ❌ @${u.screenName} (id=${u.id})`));
+    }
+    console.log('[X Unfollower] ========================');
 
     return users;
   }
@@ -181,17 +288,28 @@
     const users = [];
 
     try {
+      // Try multiple paths to find instructions (X updates API structure frequently)
       const instructions =
         data?.data?.user?.result?.timeline?.timeline?.instructions ||
         data?.data?.user?.result?.timeline_v2?.timeline?.instructions ||
+        data?.data?.user?.result?.timeline?.instructions ||
+        data?.data?.timeline?.timeline?.instructions ||
+        data?.data?.timeline_v2?.timeline?.instructions ||
         [];
 
+      if (instructions.length === 0) {
+        console.log('[X Unfollower] ⚠️ 未找到 instructions, data结构:', JSON.stringify(Object.keys(data?.data || {})));
+      }
+
       for (const instruction of instructions) {
-        const entries = instruction.entries || [];
+        const entries = instruction.entries || instruction.moduleItems || [];
         for (const entry of entries) {
+          // Try multiple paths to find user result
           const result =
             entry?.content?.itemContent?.user_results?.result ||
-            entry?.content?.itemContent?.user_result?.result;
+            entry?.content?.itemContent?.user_result?.result ||
+            entry?.item?.itemContent?.user_results?.result ||
+            entry?.item?.itemContent?.user_result?.result;
 
           if (result) {
             const legacy = result.legacy || {};
@@ -200,29 +318,44 @@
             const relationship = result.relationship_perspectives || {};
             const profileBio = result.profile_bio || {};
 
-            const followedBy = relationship.followed_by || false;
-            const avatarUrl = (avatarObj.image_url || '').replace('_normal', '_bigger');
+            const followedBy = relationship.followed_by || legacy.followed_by || false;
+
+            // Try multiple avatar paths
+            const avatarUrl = (
+              avatarObj.image_url ||
+              legacy.profile_image_url_https ||
+              core.profile_image_url_https ||
+              ''
+            ).replace('_normal', '_bigger');
+
+            // Try multiple name/screenName paths
+            const screenName = core.screen_name || legacy.screen_name || '';
+            const name = core.name || legacy.name || '';
 
             const user = {
               id: result.rest_id || result.id,
-              name: core.name || '',
-              screenName: core.screen_name || '',
+              name,
+              screenName,
               avatar: avatarUrl,
-              followersCount: legacy.followers_count || 0,
-              followingCount: legacy.friends_count || 0,
+              followersCount: legacy.followers_count ?? legacy.normal_followers_count ?? 0,
+              followingCount: legacy.friends_count ?? 0,
               isFollowingYou: followedBy,
               isBlueVerified: result.is_blue_verified || false,
-              statusesCount: legacy.statuses_count || 0,
+              statusesCount: legacy.statuses_count ?? 0,
               status: followedBy ? 'mutual' : 'not-following-back',
               description: profileBio.description || legacy.description || '',
             };
 
-            if (user.id) users.push(user);
+            if (user.id && user.screenName) {
+              users.push(user);
+            } else {
+              console.log('[X Unfollower] ⚠️ 跳过无效用户, result keys:', Object.keys(result));
+            }
           }
         }
       }
     } catch (e) {
-      console.error('Error extracting users from response:', e);
+      console.error('[X Unfollower] Error extracting users from response:', e);
     }
 
     return users;
@@ -267,8 +400,14 @@
           isFollowingYou,
           isBlueVerified,
           status: isFollowingYou ? 'mutual' : 'not-following-back',
+          followersCount: null,
+          followingCount: null,
+          statusesCount: null,
+          description: '',
+          incomplete: true,
         };
 
+        console.log(`[X Unfollower] 🟡 DOM回退添加: @${screenName} (无粉丝数据)`);
         seenIds.add(screenName);
         users.push(user);
       } catch (e) { /* ignore */ }
