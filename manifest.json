@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Unfollower",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "智能管理 X (Twitter) 关注列表，批量取消关注不互关或非蓝 V 的账号",
   "icons": {
     "16": "src/assets/icons/icon16.png",
