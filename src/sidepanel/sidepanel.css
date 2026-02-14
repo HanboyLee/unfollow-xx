@@ -107,7 +107,7 @@ body {
 }
 
 /* ============================================
-   Daily Quota Bar
+   Hourly Quota Bar
    ============================================ */
 
 .quota-section {
@@ -156,6 +156,20 @@ body {
 
 .quota-fill.danger {
   background: linear-gradient(90deg, var(--color-danger), #FF6B6B) !important;
+}
+
+.quota-timer {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-warning);
+  text-align: center;
+  font-weight: 500;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 /* ============================================

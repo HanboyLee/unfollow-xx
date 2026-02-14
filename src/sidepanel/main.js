@@ -1,12 +1,12 @@
 /**
  * X Unfollower — Side Panel Entry Point
- * Handles: search, filters, single unfollow with daily limit.
+ * Handles: search, filters, single unfollow with hourly limit and countdown.
  */
 
 import './sidepanel.css';
 import { showToast, escapeHtml, formatNumber, getBadgeClass, getBadgeText, blueCheckSvg, handleAvatarError, debounce } from './helpers.js';
 
-const DAILY_LIMIT = 50;
+const HOURLY_LIMIT = 100;
 
 // ============================================
 // State
@@ -19,10 +19,12 @@ const state = {
   currentFilter: 'all',
   searchQuery: '',
   isScanning: false,
-  dailyCount: 0,
+  hourlyCount: 0,
+  resetIn: 0,
   limitReached: false,
   unfollowedIds: new Set(),
   pendingUnfollow: null, // user object for confirm modal
+  countdownTimer: null, // countdown interval timer
 };
 
 // ============================================
@@ -35,6 +37,7 @@ const $$ = (sel) => document.querySelectorAll(sel);
 const DOM = {
   quotaCount: $('#quota-count'),
   quotaFill: $('#quota-fill'),
+  quotaTimer: null, // will be created dynamically
 
   statFollowing: $('#stat-following'),
   statNotFollowingBack: $('#stat-not-following-back'),
@@ -69,8 +72,11 @@ const DOM = {
 // ============================================
 
 async function init() {
+  // Get or create quota timer element
+  DOM.quotaTimer = $('#quota-timer');
+
   await loadWhitelist();
-  await loadDailyCount();
+  await loadHourlyCount();
   await loadUnfollowedIds();
   bindEvents();
 
@@ -118,35 +124,110 @@ function bindEvents() {
 }
 
 // ============================================
-// Daily Quota
+// Hourly Quota with Countdown
 // ============================================
 
-async function loadDailyCount() {
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: 'GET_DAILY_COUNT' });
-    if (resp) {
-      state.dailyCount = resp.count || 0;
-      state.limitReached = state.dailyCount >= DAILY_LIMIT;
+/**
+ * Format milliseconds to MM:SS
+ */
+function formatTime(ms) {
+  if (ms <= 0) return '00:00';
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+/**
+ * Update the countdown display
+ */
+function updateCountdownDisplay() {
+  if (!DOM.quotaTimer) return;
+
+  if (state.limitReached && state.resetIn > 0) {
+    DOM.quotaTimer.textContent = `重置倒计时: ${formatTime(state.resetIn)}`;
+    DOM.quotaTimer.style.display = 'block';
+  } else {
+    DOM.quotaTimer.style.display = 'none';
+  }
+}
+
+/**
+ * Start the countdown timer
+ */
+function startCountdownTimer() {
+  // Clear existing timer
+  if (state.countdownTimer) {
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+  }
+
+  // Only start if we're at limit and have time remaining
+  if (!state.limitReached || state.resetIn <= 0) return;
+
+  state.countdownTimer = setInterval(() => {
+    state.resetIn -= 1000;
+
+    if (state.resetIn <= 0) {
+      // Timer expired - reset state
+      clearInterval(state.countdownTimer);
+      state.countdownTimer = null;
+      state.limitReached = false;
+      state.hourlyCount = 0;
+      state.resetIn = 0;
+
       updateQuotaUI();
+      updateCountdownDisplay();
+      enableAllUnfollowButtons();
+      showToast(DOM.toastContainer, '限额已重置，可以继续取关', 'success');
+    } else {
+      updateCountdownDisplay();
+    }
+  }, 1000);
+}
+
+/**
+ * Enable all unfollow buttons
+ */
+function enableAllUnfollowButtons() {
+  document.querySelectorAll('.btn-unfollow:not(.unfollowed)').forEach((btn) => {
+    btn.disabled = false;
+  });
+}
+
+async function loadHourlyCount() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'GET_HOURLY_COUNT' });
+    if (resp) {
+      state.hourlyCount = resp.count || 0;
+      state.resetIn = resp.resetIn || 0;
+      state.limitReached = state.hourlyCount >= HOURLY_LIMIT;
+      updateQuotaUI();
+
+      // Start countdown if at limit
+      if (state.limitReached && state.resetIn > 0) {
+        updateCountdownDisplay();
+        startCountdownTimer();
+      }
     }
   } catch (e) { /* ignore */ }
 }
 
 function updateQuotaUI() {
-  const count = state.dailyCount;
-  const pct = Math.min((count / DAILY_LIMIT) * 100, 100);
+  const count = state.hourlyCount;
+  const pct = Math.min((count / HOURLY_LIMIT) * 100, 100);
 
-  DOM.quotaCount.textContent = `${count} / ${DAILY_LIMIT}`;
+  DOM.quotaCount.textContent = `${count} / ${HOURLY_LIMIT}`;
   DOM.quotaFill.style.width = pct + '%';
 
   // Color states
   DOM.quotaCount.className = 'quota-count';
   DOM.quotaFill.className = 'progress-fill quota-fill';
 
-  if (count >= DAILY_LIMIT) {
+  if (count >= HOURLY_LIMIT) {
     DOM.quotaCount.classList.add('limit-reached');
     DOM.quotaFill.classList.add('danger');
-  } else if (count >= DAILY_LIMIT * 0.8) {
+  } else if (count >= HOURLY_LIMIT * 0.8) {
     DOM.quotaCount.classList.add('limit-warning');
     DOM.quotaFill.classList.add('warning');
   }
@@ -218,7 +299,8 @@ function resetScanState() {
 
 function openUnfollowModal(user) {
   if (state.limitReached) {
-    showToast(DOM.toastContainer, `今日已达取关上限 ${DAILY_LIMIT} 次，请明天再试`, 'warning');
+    const timeStr = formatTime(state.resetIn);
+    showToast(DOM.toastContainer, `已达每小时上限 ${HOURLY_LIMIT} 次，请等待 ${timeStr}`, 'warning');
     return;
   }
 
@@ -263,8 +345,9 @@ async function confirmUnfollow() {
     });
 
     if (result && result.success) {
-      state.dailyCount = result.dailyCount;
+      state.hourlyCount = result.hourlyCount;
       state.limitReached = result.limitReached;
+      state.resetIn = result.resetIn;
       state.unfollowedIds.add(user.id);
       await saveUnfollowedIds();
       updateQuotaUI();
@@ -279,7 +362,10 @@ async function confirmUnfollow() {
       // If limit reached after this unfollow
       if (result.limitReached) {
         disableAllUnfollowButtons();
-        showToast(DOM.toastContainer, `今日已达上限 ${DAILY_LIMIT} 次`, 'warning');
+        updateCountdownDisplay();
+        startCountdownTimer();
+        const timeStr = formatTime(state.resetIn);
+        showToast(DOM.toastContainer, `已达每小时上限 ${HOURLY_LIMIT} 次，${timeStr} 后重置`, 'warning');
       }
     } else {
       if (btn) {
@@ -289,7 +375,10 @@ async function confirmUnfollow() {
 
       if (result?.limitReached) {
         state.limitReached = true;
+        state.resetIn = result.resetIn || 0;
         updateQuotaUI();
+        updateCountdownDisplay();
+        startCountdownTimer();
         disableAllUnfollowButtons();
         showToast(DOM.toastContainer, result.error, 'warning');
       } else {

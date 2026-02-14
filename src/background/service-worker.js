@@ -1,10 +1,10 @@
 /**
  * X Unfollower — Background Service Worker
  * Coordinates between Side Panel and Content Script.
- * Handles single unfollow requests with daily limit tracking.
+ * Handles single unfollow requests with hourly limit tracking.
  */
 
-import { Storage, DAILY_UNFOLLOW_LIMIT } from '../utils/storage.js';
+import { Storage, HOURLY_UNFOLLOW_LIMIT, HOUR_IN_MS } from '../utils/storage.js';
 
 // ============================================
 // Side Panel Setup
@@ -31,9 +31,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleSingleUnfollow(message.data, sendResponse);
       return true; // async response
 
-    case 'GET_DAILY_COUNT':
-      Storage.getDailyUnfollowCount().then((count) => {
-        sendResponse({ count, limit: DAILY_UNFOLLOW_LIMIT });
+    case 'GET_HOURLY_COUNT':
+      Storage.getHourlyUnfollowCount().then(({ count, resetIn }) => {
+        sendResponse({ count, limit: HOURLY_UNFOLLOW_LIMIT, resetIn });
       });
       return true;
 
@@ -124,18 +124,20 @@ async function handleStartScanTab(tabId, sendResponse) {
 }
 
 // ============================================
-// Single Unfollow with Daily Limit
+// Single Unfollow with Hourly Limit
 // ============================================
 
 async function handleSingleUnfollow({ user, tabId }, sendResponse) {
   try {
-    // Check daily limit
-    const isLimited = await Storage.isDailyLimitReached();
-    if (isLimited) {
+    // Check hourly limit
+    const { reached, resetIn } = await Storage.isHourlyLimitReached();
+    if (reached) {
+      const minutes = Math.ceil(resetIn / 60000);
       sendResponse({
         success: false,
-        error: `今日已达上限 ${DAILY_UNFOLLOW_LIMIT} 次，请明天再试`,
+        error: `已达每小时上限 ${HOURLY_UNFOLLOW_LIMIT} 次，请等待 ${minutes} 分钟`,
         limitReached: true,
+        resetIn,
       });
       return;
     }
@@ -148,7 +150,7 @@ async function handleSingleUnfollow({ user, tabId }, sendResponse) {
 
     if (result && result.success) {
       // Increment counter and record history
-      const newCount = await Storage.incrementDailyUnfollow();
+      const { count, resetIn: newResetIn, limitReached } = await Storage.incrementHourlyUnfollow();
 
       await Storage.addHistory({
         userId: user.id,
@@ -159,9 +161,10 @@ async function handleSingleUnfollow({ user, tabId }, sendResponse) {
 
       sendResponse({
         success: true,
-        dailyCount: newCount,
-        limit: DAILY_UNFOLLOW_LIMIT,
-        limitReached: newCount >= DAILY_UNFOLLOW_LIMIT,
+        hourlyCount: count,
+        limit: HOURLY_UNFOLLOW_LIMIT,
+        limitReached,
+        resetIn: newResetIn,
       });
     } else {
       sendResponse({

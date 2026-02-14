@@ -1,7 +1,7 @@
 /**
  * X Unfollower — Storage Utility
  * Wraps chrome.storage.local with async/await helpers.
- * Includes daily unfollow quota tracking.
+ * Includes hourly unfollow quota tracking with sliding window.
  */
 
 export const Storage = {
@@ -38,53 +38,68 @@ export const Storage = {
     return (await this.get('unfollowHistory')) || [];
   },
 
-  // ---- Daily Unfollow Quota ----
+  // ---- Hourly Unfollow Quota (Sliding Window) ----
 
   /**
-   * Get today's unfollow count.
-   * Automatically resets if the stored date is not today.
+   * Get current hour's unfollow count with sliding window.
+   * Returns { count, windowStart, resetIn }.
+   * Automatically resets if the window has expired (1 hour passed).
    */
-  async getDailyUnfollowCount() {
-    const data = await this.get('dailyUnfollow');
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  async getHourlyUnfollowCount() {
+    const data = await this.get('hourlyUnfollow');
+    const now = Date.now();
 
-    if (!data || data.date !== today) {
-      // Reset for new day
-      const fresh = { date: today, count: 0 };
-      await this.set('dailyUnfollow', fresh);
-      return 0;
+    if (!data || (now - data.windowStart >= HOUR_IN_MS)) {
+      // Window expired or doesn't exist - reset
+      const fresh = { windowStart: now, count: 0 };
+      await this.set('hourlyUnfollow', fresh);
+      return { count: 0, windowStart: now, resetIn: HOUR_IN_MS };
     }
 
-    return data.count;
+    const resetIn = HOUR_IN_MS - (now - data.windowStart);
+    return { count: data.count, windowStart: data.windowStart, resetIn };
   },
 
   /**
-   * Increment today's unfollow count by 1.
-   * Returns the new count.
+   * Increment the hourly unfollow count by 1.
+   * Returns { count, windowStart, resetIn, limitReached }.
    */
-  async incrementDailyUnfollow() {
-    const data = await this.get('dailyUnfollow');
-    const today = new Date().toISOString().slice(0, 10);
+  async incrementHourlyUnfollow() {
+    const data = await this.get('hourlyUnfollow');
+    const now = Date.now();
 
     let record;
-    if (!data || data.date !== today) {
-      record = { date: today, count: 1 };
+    let resetIn;
+
+    if (!data || (now - data.windowStart >= HOUR_IN_MS)) {
+      // Window expired - start fresh
+      record = { windowStart: now, count: 1 };
+      resetIn = HOUR_IN_MS;
     } else {
-      record = { date: today, count: data.count + 1 };
+      // Continue in current window
+      record = { windowStart: data.windowStart, count: data.count + 1 };
+      resetIn = HOUR_IN_MS - (now - data.windowStart);
     }
 
-    await this.set('dailyUnfollow', record);
-    return record.count;
+    await this.set('hourlyUnfollow', record);
+    return {
+      count: record.count,
+      windowStart: record.windowStart,
+      resetIn,
+      limitReached: record.count >= HOURLY_UNFOLLOW_LIMIT,
+    };
   },
 
   /**
-   * Check if daily limit is reached.
-   * @param {number} limit - Max allowed unfollows per day (default 50)
+   * Check if hourly limit is reached.
+   * Returns { reached, resetIn }.
+   * @param {number} limit - Max allowed unfollows per hour (default 100)
    */
-  async isDailyLimitReached(limit = 50) {
-    const count = await this.getDailyUnfollowCount();
-    return count >= limit;
+  async isHourlyLimitReached(limit = HOURLY_UNFOLLOW_LIMIT) {
+    const { count, resetIn } = await this.getHourlyUnfollowCount();
+    return { reached: count >= limit, resetIn };
   },
 };
 
-export const DAILY_UNFOLLOW_LIMIT = 50;
+export const HOURLY_UNFOLLOW_LIMIT = 100;
+export const HOUR_IN_MS = 60 * 60 * 1000;
