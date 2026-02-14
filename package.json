@@ -1,6 +1,6 @@
 {
   "name": "x-unfollower",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "X 平台批量取消关注工具 Chrome 扩展",
   "type": "module",
