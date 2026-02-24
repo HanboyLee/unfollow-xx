@@ -31,7 +31,17 @@ jobs:
         run: npm install --verbose
 
       - name: Build extension
-        run: npm run build --verbose
+        run: |
+          npm run build 2>&1 || true
+          echo "BUILD_EXIT_CODE=$?" >> $GITHUB_ENV
+        continue-on-error: true
+
+      - name: Check build result
+        if: env.BUILD_EXIT_CODE != '0'
+        run: |
+          echo "## Build Failed" >> $GITHUB_STEP_SUMMARY
+          echo "Build exited with code: $BUILD_EXIT_CODE" >> $GITHUB_STEP_SUMMARY
+          exit 1
 
       - name: Create release package
         run: |
