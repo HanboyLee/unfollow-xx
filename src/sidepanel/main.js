@@ -4,7 +4,7 @@
  */
 
 import './sidepanel.css';
-import { showToast, escapeHtml, formatNumber, getBadgeClass, getBadgeText, blueCheckSvg, handleAvatarError, debounce } from './helpers.js';
+import { showToast, escapeHtml, formatNumber, getBadgeClass, getBadgeText, getFollowersClass, blueCheckSvg, handleAvatarError, debounce } from './helpers.js';
 
 const HOURLY_LIMIT = 100;
 
@@ -17,6 +17,7 @@ const state = {
   filteredUsers: [],
   whitelist: new Set(),
   currentFilter: 'all',
+  currentSort: 'default',
   searchQuery: '',
   isScanning: false,
   hourlyCount: 0,
@@ -54,6 +55,7 @@ const DOM = {
 
   filterSection: $('#filter-section'),
   filterTabs: $$('.filter-tab'),
+  sortSelect: $('#sort-select'),
 
   userListSection: $('#user-list-section'),
   userList: $('#user-list'),
@@ -110,6 +112,12 @@ function bindEvents() {
       state.currentFilter = tab.dataset.filter;
       applyFilter();
     });
+  });
+
+  // Sort select
+  DOM.sortSelect.addEventListener('change', () => {
+    state.currentSort = DOM.sortSelect.value;
+    applyFilter();
   });
 
   // Modal
@@ -438,6 +446,13 @@ function onUsersLoaded() {
   DOM.searchSection.style.display = '';
   DOM.filterSection.style.display = '';
   DOM.userListSection.style.display = '';
+
+  // Only show sort controls when there are users
+  if (state.users.length > 0) {
+    DOM.sortSelect.style.display = '';
+  } else {
+    DOM.sortSelect.style.display = 'none';
+  }
 }
 
 function updateStats() {
@@ -467,6 +482,23 @@ function applyFilter() {
       (u.name || '').toLowerCase().includes(state.searchQuery) ||
       (u.screenName || '').toLowerCase().includes(state.searchQuery)
     );
+  }
+
+  // Sort
+  if (state.currentSort !== 'default') {
+    const [field, direction] = state.currentSort.split('-');
+    list.sort((a, b) => {
+      let valA, valB;
+      if (field === 'followers') {
+        valA = a.followersCount || 0;
+        valB = b.followersCount || 0;
+      }
+      if (direction === 'desc') {
+        return valB - valA;
+      } else {
+        return valA - valB;
+      }
+    });
   }
 
   state.filteredUsers = list;
@@ -503,7 +535,7 @@ function renderUserList() {
               ${user.isBlueVerified ? blueCheckSvg() : ''}
             </div>
             <div class="user-handle">@${escapeHtml(user.screenName)}</div>
-            ${user.followersCount != null ? `<div class="user-followers">粉丝 ${formatNumber(user.followersCount)}</div>` : ''}
+            ${user.followersCount != null ? `<div class="user-followers ${getFollowersClass(user.followersCount)}">粉丝 ${formatNumber(user.followersCount)}</div>` : ''}
           </div>
           <div class="user-actions">
             <span class="badge ${getBadgeClass(user.status)}">${getBadgeText(user.status)}</span>
