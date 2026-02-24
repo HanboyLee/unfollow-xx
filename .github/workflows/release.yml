@@ -20,28 +20,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-
-      - name: Show Node/npm version
-        run: |
-          node -v
-          npm -v
 
       - name: Install dependencies
-        run: npm install --verbose
+        run: npm install
 
       - name: Build extension
-        run: |
-          npm run build 2>&1 || true
-          echo "BUILD_EXIT_CODE=$?" >> $GITHUB_ENV
-        continue-on-error: true
-
-      - name: Check build result
-        if: env.BUILD_EXIT_CODE != '0'
-        run: |
-          echo "## Build Failed" >> $GITHUB_STEP_SUMMARY
-          echo "Build exited with code: $BUILD_EXIT_CODE" >> $GITHUB_STEP_SUMMARY
-          exit 1
+        run: npm run build
 
       - name: Create release package
         run: |
