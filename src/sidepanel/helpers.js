@@ -44,6 +44,17 @@ export function getBadgeText(status) {
 }
 
 /**
+ * Get CSS class for followers count color
+ */
+export function getFollowersClass(count) {
+  if (typeof count !== 'number') return '';
+  if (count >= 1000000) return 'followers-red';
+  if (count >= 100000) return 'followers-orange';
+  if (count >= 10000) return 'followers-yellow';
+  return '';
+}
+
+/**
  * Blue V verified badge SVG markup
  */
 export function blueCheckSvg() {
