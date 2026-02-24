@@ -6,10 +6,11 @@
 
 - **侧边栏体验** - 使用 Chrome Side Panel API，不遮挡页面，可持续操作
 - **智能筛选** - 按不互关、非蓝 V、互关等条件筛选关注列表
+- **搜索排序** - 支持按粉丝数排序，只有列表有内容时显示
 - **蓝 V 检测** - 快速识别 X Premium 认证用户
 - **白名单保护** - 防止误取消重要关注
 - **操作历史** - 记录所有取消关注操作
-- **速率控制** - 每日上限 50 次，防止账号被限制
+- **速率控制** - 每小时上限 100 次，带倒计时显示，防止账号被限制
 - **纯本地存储** - 所有数据存储在本地，保护用户隐私
 - **实时进度** - 扫描过程显示实时进度，支持随时停止
 - **CSP 绕过** - 使用 MAIN World 脚本拦截 GraphQL API 响应
@@ -133,7 +134,7 @@ x-unfollower/
 | 方向 | 消息类型 | 说明 |
 |------|----------|------|
 | **Side Panel → Service Worker** | `UNFOLLOW_ONE` | 请求取关指定用户 |
-| | `GET_DAILY_COUNT` | 查询今日配额 |
+| | `GET_HOURLY_COUNT` | 查询每小时配额 |
 | | `START_SCAN_TAB` | 发起扫描（自动导航） |
 | | `STOP_SCAN_TAB` | 停止扫描 |
 | **Service Worker → Content Script** | `PING` | 检查 content script 是否加载 |
@@ -195,7 +196,7 @@ x-unfollower/
                                   check quota                           try API first
                                        │                                     │
                               ┌─────────┴─────────┐                         │
-                              │ daily limit: 50   │                         │
+                              │ hourly limit: 100 │                         │
                               └─────────┬─────────┘                         │
                                         │                                     ▼
                               increment counter                    ┌──────────────────┐
@@ -220,7 +221,7 @@ x-unfollower/
 
 **详细步骤：**
 1. 用户点击"取关" → 确认弹窗
-2. Service Worker 检查每日限额（50 次/天）
+2. Service Worker 检查每小时限额（100 次/小时）
 3. 优先尝试 API 取关 (`/i/api/1.1/friendships/destroy.json`)
 4. API 失败则回退到 DOM 点击方式
 5. 最后手段：导航到用户个人主页
@@ -237,7 +238,7 @@ x-unfollower/
 | `cachedAt` | Number | 缓存时间戳 |
 | `whitelist` | Array | 受保护用户 ID 数组 |
 | `unfollowedIds` | Array | 已取关用户 ID 数组（持久化） |
-| `dailyUnfollow` | Object | `{date: "YYYY-MM-DD", count: N}` |
+| `hourlyUnfollow` | Object | `{date: "YYYY-MM-DD-HH", count: N}` |
 | `unfollowHistory` | Array | 历史记录条目（最多 500 条） |
 
 ### 用户对象结构
@@ -263,7 +264,7 @@ x-unfollower/
 
 - **Manifest 版本**: V3
 - **最低 Chrome 版本**: 114+ (Side Panel API)
-- **每日取关上限**: 50 次（硬编码）
+- **每小时取关上限**: 100 次（硬编码）
 - **滚动间隔**: 1500ms
 - **最大滚动重试**: 5 次后结束扫描
 - **缓存有效期**: 30 分钟
